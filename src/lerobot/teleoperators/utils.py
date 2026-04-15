@@ -63,6 +63,12 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> "Teleoperator":
         from .gamepad.teleop_gamepad import GamepadTeleop
 
         return GamepadTeleop(config)
+    
+
+    elif config.type == "walker_s2_keyboard":
+        from lerobot.teleoperators.walker_s2_keyboard.teleop import WalkerS2KeyboardTeleop
+
+        return WalkerS2KeyboardTeleop(config)
     elif config.type == "keyboard_ee":
         from .keyboard.teleop_keyboard import KeyboardEndEffectorTeleop
 

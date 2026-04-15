@@ -251,7 +251,8 @@ class ProcessorMigrationError(Exception):
 
 
 @dataclass
-class DataProcessorPipeline[TInput, TOutput](HubMixin):
+class DataProcessorPipeline(HubMixin):
+    __class_getitem__ = classmethod(lambda cls, *args: cls)
     """A sequential pipeline for processing data, integrated with the Hugging Face Hub.
 
     This class chains together multiple `ProcessorStep` instances to form a complete
@@ -465,7 +466,7 @@ class DataProcessorPipeline[TInput, TOutput](HubMixin):
         to_transition: Callable[[TInput], EnvTransition] | None = None,
         to_output: Callable[[EnvTransition], TOutput] | None = None,
         **kwargs,
-    ) -> DataProcessorPipeline[TInput, TOutput]:
+    ) -> DataProcessorPipeline:
         """Loads a pipeline from a local directory, single file, or Hugging Face Hub repository.
 
         This method implements a simplified loading pipeline with intelligent migration detection:
@@ -1215,7 +1216,7 @@ class DataProcessorPipeline[TInput, TOutput](HubMixin):
         """Returns the number of steps in the pipeline."""
         return len(self.steps)
 
-    def __getitem__(self, idx: int | slice) -> ProcessorStep | DataProcessorPipeline[TInput, TOutput]:
+    def __getitem__(self, idx: int | slice) -> ProcessorStep | DataProcessorPipeline:
         """Retrieves a step or a sub-pipeline by index or slice.
 
         Args:
@@ -1432,8 +1433,8 @@ class DataProcessorPipeline[TInput, TOutput](HubMixin):
 
 
 # Type aliases for semantic clarity.
-RobotProcessorPipeline = DataProcessorPipeline[TInput, TOutput]
-PolicyProcessorPipeline = DataProcessorPipeline[TInput, TOutput]
+RobotProcessorPipeline = DataProcessorPipeline
+PolicyProcessorPipeline = DataProcessorPipeline
 
 
 class ObservationProcessorStep(ProcessorStep, ABC):

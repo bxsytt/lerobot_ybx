@@ -1232,7 +1232,8 @@ class LookAheadError(Exception):
     pass
 
 
-class Backtrackable[T]:
+from typing import TypeVar; T = TypeVar("T")
+class Backtrackable:
     """
     Wrap any iterator/iterable so you can step back up to `history` items
     and look ahead up to `lookahead` items.

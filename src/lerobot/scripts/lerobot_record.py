@@ -64,6 +64,25 @@ lerobot-record \
   --dataset.streaming_encoding=true \
   # --dataset.vcodec=auto \
   --dataset.encoder_threads=2
+
+
+
+
+
+
+
+
+
+/isaac-sim/python.sh -m lerobot.scripts.lerobot_record \
+    --robot.type=walker_s2_sim \
+    --robot.headless=false \
+    --teleop.type=walker_s2_keyboard \
+    --dataset.root=/workspace/datasets/task4/packing_box_v3_07 \
+    --dataset.repo_id=liberow/task4_08 \
+    --dataset.num_episodes=10 \
+    --dataset.single_task="packing box" \
+    --dataset.video=true \
+    --dataset.push_to_hub=false
 ```
 """
 
@@ -113,8 +132,10 @@ from lerobot.robots import (  # noqa: F401
     openarm_follower,
     reachy2,
     so_follower,
-    unitree_g1 as unitree_g1_robot,
+    walker_s2_sim
 )
+
+
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
@@ -129,6 +150,7 @@ from lerobot.teleoperators import (  # noqa: F401
     reachy2_teleoperator,
     so_leader,
     unitree_g1,
+    walker_s2_keyboard
 )
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
 from lerobot.utils.constants import ACTION, OBS_STR
@@ -144,7 +166,7 @@ from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import (
     get_safe_torch_device,
     init_logging,
-    log_say,
+    # log_say,
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
@@ -276,7 +298,7 @@ class RecordConfig:
 """
 
 
-@safe_stop_image_writer
+# @safe_stop_image_writer
 def record_loop(
     robot: Robot,
     events: dict,
@@ -401,11 +423,9 @@ def record_loop(
             action_values = act_processed_teleop
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
-        # Send action to robot
-        # Action can eventually be clipped using `max_relative_target`,
-        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         _sent_action = robot.send_action(robot_action_to_send)
+        # revise by sjj
+        action_values = _sent_action
 
         # Write to dataset
         if dataset is not None:
@@ -443,6 +463,15 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         else cfg.display_compressed_images
     )
 
+    # ====== 核心修复开始：手动同步 FPS 到 Isaac Sim 步长 ======
+    # if cfg.robot.type == "walker_s2_sim":
+    #     # 如果命令行传入了 --dataset.fps，将其同步给机器人的 dt
+    #     dt = 1.0 / cfg.dataset.fps
+    #     cfg.robot.physics_dt = dt
+    #     cfg.robot.rendering_dt = dt
+    #     logging.info(f"已同步 Isaac Sim 步长至 {dt:.4f}s (匹配数据集 {cfg.dataset.fps} FPS)")
+    # ======================================================
+    
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
@@ -532,7 +561,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-                log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+                # log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
                 record_loop(
                     robot=robot,
                     events=events,
@@ -556,7 +585,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 if not events["stop_recording"] and (
                     (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
                 ):
-                    log_say("Reset the environment", cfg.play_sounds)
+                    # log_say("Reset the environment", cfg.play_sounds)
 
                     record_loop(
                         robot=robot,
@@ -572,7 +601,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     )
 
                 if events["rerecord_episode"]:
-                    log_say("Re-record episode", cfg.play_sounds)
+                    # log_say("Re-record episode", cfg.play_sounds)
                     events["rerecord_episode"] = False
                     events["exit_early"] = False
                     dataset.clear_episode_buffer()
@@ -581,7 +610,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 dataset.save_episode()
                 recorded_episodes += 1
     finally:
-        log_say("Stop recording", cfg.play_sounds, blocking=True)
+        # log_say("Stop recording", cfg.play_sounds, blocking=True)
 
         if dataset:
             dataset.finalize()
@@ -597,7 +626,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if cfg.dataset.push_to_hub:
             dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
 
-        log_say("Exiting", cfg.play_sounds)
+        # log_say("Exiting", cfg.play_sounds)
     return dataset
 
 

@@ -27,6 +27,8 @@ from .config import TeleoperatorConfig
 
 
 class Teleoperator(abc.ABC):
+    __class_getitem__ = classmethod(lambda cls, *args: cls)
+    __class_getitem__ = classmethod(lambda cls, *args: cls)
     """
     The base abstract class for all LeRobot-compatible teleoperation devices.
 

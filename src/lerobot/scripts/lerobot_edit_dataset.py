@@ -160,6 +160,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import datasets
 import draccus
 
 from lerobot.configs import parser
@@ -172,6 +173,7 @@ from lerobot.datasets.dataset_tools import (
     split_dataset,
 )
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.utils import get_hf_features_from_features
 from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.utils.utils import init_logging
 
@@ -275,6 +277,66 @@ def get_output_path(
     return output_repo_id, output_path
 
 
+def enforce_dataset_data_types(dataset: LeRobotDataset) -> bool:
+    """Ensure parquet data column types match the dataset meta feature schema.
+
+    Returns:
+        True if at least one parquet file was rewritten after forced type casting.
+    """
+    expected_features = get_hf_features_from_features(dataset.meta.features)
+    data_dir = dataset.root / "data"
+    parquet_files = sorted(data_dir.rglob("*.parquet"))
+
+    if not parquet_files:
+        logging.warning(f"No parquet files found under {data_dir}. Skipping type enforcement.")
+        return False
+
+    logging.info(
+        f"Checking data types for dataset {dataset.repo_id} ({len(parquet_files)} parquet files)"
+    )
+
+    files_converted = 0
+
+    for parquet_path in parquet_files:
+        ds = datasets.Dataset.from_parquet(str(parquet_path))
+        current_features = ds.features
+
+        mismatches: list[str] = []
+        for col_name, target_feature in expected_features.items():
+            if col_name not in current_features:
+                logging.warning(
+                    f"[{dataset.repo_id}] Missing column '{col_name}' in {parquet_path}. "
+                    "Skipping conversion for this column."
+                )
+                continue
+
+            src_type = str(current_features[col_name])
+            target_type = str(target_feature)
+            if src_type != target_type:
+                mismatches.append(f"{col_name}: {src_type} -> {target_type}")
+
+        if not mismatches:
+            continue
+
+        logging.warning(
+            f"[{dataset.repo_id}] Type mismatches detected in {parquet_path}. "
+            "Applying forced conversion to match meta/features."
+        )
+        for mismatch in mismatches:
+            logging.info(f"  {mismatch}")
+
+        casted = ds.cast(expected_features)
+        casted.to_parquet(str(parquet_path))
+        files_converted += 1
+
+    if files_converted == 0:
+        logging.info(f"[{dataset.repo_id}] All parquet files already match meta/features types.")
+        return False
+
+    logging.info(f"[{dataset.repo_id}] Forced conversion applied to {files_converted} parquet file(s).")
+    return True
+
+
 def handle_delete_episodes(cfg: EditDatasetConfig) -> None:
     if not isinstance(cfg.operation, DeleteEpisodesConfig):
         raise ValueError("Operation config must be DeleteEpisodesConfig")
@@ -346,7 +408,6 @@ def handle_split(cfg: EditDatasetConfig) -> None:
 def handle_merge(cfg: EditDatasetConfig) -> None:
     if not isinstance(cfg.operation, MergeConfig):
         raise ValueError("Operation config must be MergeConfig")
-
     if not cfg.operation.repo_ids:
         raise ValueError("repo_ids must be specified for merge operation")
 
@@ -355,6 +416,7 @@ def handle_merge(cfg: EditDatasetConfig) -> None:
             "merge uses --new_repo_id and --new_root for the merged dataset. The --repo_id and --root parameters are ignored."
         )
 
+    # 1. 加载数据集
     if cfg.operation.roots:
         if len(cfg.operation.roots) != len(cfg.operation.repo_ids):
             raise ValueError("repo_ids and roots must have the same length for merge operation")
@@ -367,9 +429,21 @@ def handle_merge(cfg: EditDatasetConfig) -> None:
         logging.info(f"Loading {len(cfg.operation.repo_ids)} datasets to merge")
         datasets = [LeRobotDataset(repo_id) for repo_id in cfg.operation.repo_ids]
 
-    output_dir = Path(cfg.new_root) if cfg.new_root else HF_LEROBOT_HOME / cfg.new_repo_id
+    converted_count = 0
+    for ds in datasets:
+        if enforce_dataset_data_types(ds):
+            converted_count += 1
 
+    if converted_count > 0:
+        logging.info(
+            f"Type enforcement completed: {converted_count}/{len(datasets)} dataset(s) needed forced conversion."
+        )
+    else:
+        logging.info("Type enforcement completed: no dataset required conversion.")
+
+    output_dir = Path(cfg.new_root) if cfg.new_root else HF_LEROBOT_HOME / cfg.new_repo_id
     logging.info(f"Merging datasets into {cfg.new_repo_id}")
+
     merged_dataset = merge_datasets(
         datasets,
         output_repo_id=cfg.new_repo_id,
@@ -380,10 +454,11 @@ def handle_merge(cfg: EditDatasetConfig) -> None:
     logging.info(
         f"Episodes: {merged_dataset.meta.total_episodes}, Frames: {merged_dataset.meta.total_frames}"
     )
-
+    
     if cfg.push_to_hub:
         logging.info(f"Pushing to hub as {cfg.new_repo_id}")
         LeRobotDataset(merged_dataset.repo_id, root=output_dir).push_to_hub()
+
 
 
 def handle_remove_feature(cfg: EditDatasetConfig) -> None:
