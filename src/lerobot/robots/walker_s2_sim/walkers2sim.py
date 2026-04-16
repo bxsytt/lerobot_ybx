@@ -550,7 +550,7 @@ class IsaacSimRobotInterface:
         return wrench_data_list
 
     def initialize_ik(self, urdf_path: str):
-        from lerobot.ecbg.source.DualArmIK import DualArmIK
+        from Ubtech_sim.source.DualArmIK import DualArmIK
 
         self.ik_solver = DualArmIK(urdf_path)
         dof_names = self._articulation.dof_names
@@ -644,7 +644,7 @@ class IsaacSimRobotInterface:
         # ==========================================
         if ik_result is not None:
             ik_result["smoothed_positions"] = all_positions
-            
+
         return ik_result
 
     def _smooth_joints(self, side: str, ik_positions: np.ndarray) -> np.ndarray:
@@ -699,6 +699,9 @@ class WalkerS2sim(Robot):
         super().__init__(config)
         self.config = config
         self.logs = {}
+
+        # self.current_control_arm = "left" # "left" or "right"
+        # self.bimanual_control_enabled = False # 默认单臂模式
 
         # Bug修复#1: 只保留一个 _is_connected 标志，所有状态检查都用它
         self._is_connected = False
@@ -770,6 +773,18 @@ class WalkerS2sim(Robot):
             raise RobotDeviceNotConnectedError("未连接")
         self._world.step(render=render)
         self._send_action_step_idx += 1
+
+    def toggle_bimanual_mode(self):
+        """由 teleop 调用，切换模式"""
+        self.bimanual_control_enabled = not self.bimanual_control_enabled
+        mode_str = "双臂同步" if self.bimanual_control_enabled else "单臂独立"
+        logging.info(f"控制模式已切换: {mode_str}")
+
+    # def toggle_bimanual_mode(self):
+    #     """由 Teleop 调用的切换接口"""
+    #     self.bimanual_control_enabled = not self.bimanual_control_enabled
+    #     status = "开启" if self.bimanual_control_enabled else "关闭"
+    #     logging.info(f"【控制模式】双臂同步控制已 {status}")
 
     # ---- 回调注册 / 注销 ----
     def _register_world_callbacks(self) -> None:
@@ -867,15 +882,17 @@ class WalkerS2sim(Robot):
                         g_close = self._robot_interface.gripper_close_width
                         g_lo, g_hi = min(g_open, g_close), max(g_open, g_close)
                         if abs(left_gripper) > 0.01:
+                            # 【Bug修复】：当 left_gripper 为 1.0 (闭合)时，应该减小宽度趋近 g_close (0.02)
+                            # 所以这里用减号：- (1.0 * 0.002) = 变小
                             self._hold_finger_positions[:2] = np.clip(
-                                self._hold_finger_positions[:2] + left_gripper * gripper_step,
+                                self._hold_finger_positions[:2] - left_gripper * gripper_step,
                                 g_lo,
                                 g_hi,
                             )
                             self._left_gripping = left_gripper > 0
                         if abs(right_gripper) > 0.01:
                             self._hold_finger_positions[2:4] = np.clip(
-                                self._hold_finger_positions[2:4] + right_gripper * gripper_step,
+                                self._hold_finger_positions[2:4] - right_gripper * gripper_step,
                                 g_lo,
                                 g_hi,
                             )
@@ -927,15 +944,16 @@ class WalkerS2sim(Robot):
                     g_close = self._robot_interface.gripper_close_width
                     g_lo, g_hi = min(g_open, g_close), max(g_open, g_close)
                     if abs(left_gripper) > 0.01:
+                        # 【Bug修复】：同理，键盘控制也必须用减号
                         self._hold_finger_positions[:2] = np.clip(
-                            self._hold_finger_positions[:2] + left_gripper * gripper_step,
+                            self._hold_finger_positions[:2] - left_gripper * gripper_step,
                             g_lo,
                             g_hi,
                         )
                         self._left_gripping = left_gripper > 0
                     if abs(right_gripper) > 0.01:
                         self._hold_finger_positions[2:4] = np.clip(
-                            self._hold_finger_positions[2:4] + right_gripper * gripper_step,
+                            self._hold_finger_positions[2:4] - right_gripper * gripper_step,
                             g_lo,
                             g_hi,
                         )
@@ -951,6 +969,7 @@ class WalkerS2sim(Robot):
         efforts = [0.0, 0.0, 0.0, 0.0]
         finger_pos = self._hold_finger_positions.copy()
 
+        # 这里的 _left_gripping 此时就对应了正确的意思：当按下 'l' 键 (1.0 > 0) 时触发力控
         if self._left_gripping:
             efforts[0] = close_tau
             efforts[1] = close_tau
@@ -1181,11 +1200,24 @@ class WalkerS2sim(Robot):
 
         # 步骤 4: SceneBuilder 构建场景
         try:
-            ecbg_root = Path(__file__).parent.parent.parent.parent.parent / "ecbg"
-            if str(ecbg_root) not in os.sys.path:
-                os.sys.path.append(str(ecbg_root))
-            from lerobot.ecbg.source.SceneBuilder import SceneBuilder
-            from lerobot.ecbg.source.DataLogger import DataLogger
+            # 获取当前工作空间的根目录 (假设是 /workspace/lerobot_0.5.1)
+            workspace_root = Path(__file__).parent.parent.parent.parent.parent.parent
+            
+            # 这里的路径改为你存放新代码的 Ubtech_sim
+            ubtech_root = workspace_root / "Ubtech_sim"
+            
+            if str(ubtech_root) not in os.sys.path:
+                # 将 Ubtech_sim 加入路径，且放在最前面防止被旧路径截胡
+                os.sys.path.insert(0, str(ubtech_root))
+            
+            # 修改导入语句，从你的 source 目录导入
+            # 注意：根据你的目录结构，如果 Ubtech_sim/source 是个 package，则：
+            # from lerobot.ecbg.source.SceneBuilder import SceneBuilder
+            # from lerobot.ecbg.source.DataLogger import DataLogger
+            from Ubtech_sim.source.SceneBuilder import SceneBuilder
+            from Ubtech_sim.source.DataLogger import DataLogger
+            
+            print(f"[WalkerS2sim] 成功从 {ubtech_root} 加载 SceneBuilder")
 
             data_logger = DataLogger(
                 enabled=False, csv_path="", camera_enabled=False, camera_hdf5_path=""
@@ -1619,10 +1651,12 @@ class WalkerS2sim(Robot):
             if keys.get(f"{axis}_down"):
                 active_delta[index] -= step
 
+        # k: gripper_open -> -1.0 (非力矩模式)
+        # l: gripper_close -> 1.0 (触发后续的力矩模式)
         if keys.get("gripper_open"):
-            active_gripper = 1.0
-        elif keys.get("gripper_close"):
             active_gripper = -1.0
+        elif keys.get("gripper_close"):
+            active_gripper = 1.0
 
         left_delta, right_delta, left_gripper, right_gripper = self._apply_active_arm_delta(
             active_delta, active_gripper

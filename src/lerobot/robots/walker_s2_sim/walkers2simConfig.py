@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from lerobot.robots.config import RobotConfig
 
 
-PHYSICS_DT = 1.0 / 60.0
-RENDERING_DT = 1.0 / 60.0
+PHYSICS_DT = 1.0 / 200.0
+RENDERING_DT = 1.0 / 20.0
 CAMERA_FPS = 30  # Bug修复: 原来写 fps=RENDERING_DT (≈0.0167)，fps是帧率整数，不是周期浮点数
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
@@ -22,8 +22,10 @@ class WalkerS2Config(RobotConfig):
     calibration_dir: str | None = None
 
     use_async_state: bool = False
-    task_cfg_path: str = "/workspace/lerobot_0.5.1/src/lerobot/ecbg/config/task4.yaml"
-    urdf_path: str = "/workspace/lerobot_0.5.1/src/lerobot/ecbg/assets/s2.urdf"
+    # task_cfg_path: str = "/workspace/lerobot_0.5.1/src/lerobot/ecbg/config/task4.yaml"
+    # urdf_path: str = "/workspace/lerobot_0.5.1/src/lerobot/ecbg/assets/s2.urdf"
+    task_cfg_path: str = "/workspace/lerobot_0.5.1/Ubtech_sim/config/Foam_Inlaying.yaml"
+    urdf_path: str = "/workspace/lerobot_0.5.1/assets/resources/s2.urdf"
     task_cfg: dict = field(default_factory=dict)
     prim_path: str = "/Root/Ref_Xform/Ref"
     robot_name: str = "walkerS2"

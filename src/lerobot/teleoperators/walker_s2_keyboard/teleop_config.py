@@ -29,5 +29,6 @@ class WalkerS2KeyboardTeleopConfig(TeleoperatorConfig):
             "l": "gripper_close",
             "g": "toggle_arm",   # 瞬时切换控制臂，不进入持久状态
             "q": "quit",
+            "0": "toggle_bimanual",
         }
     )

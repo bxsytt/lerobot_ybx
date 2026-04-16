@@ -34,6 +34,7 @@ class WalkerS2KeyboardTeleop(Teleoperator):
         }
         # toggle_arm 是瞬时切换，不加入持久状态；quit 需要单独加
         self._pressed_keys.pop("toggle_arm", None)
+        # self._pressed_keys.pop("toggle_bimanual", None)
         self._pressed_keys["quit"] = False
 
         self.current_control_arm: str = self.config.initial_control_arm
@@ -109,6 +110,12 @@ class WalkerS2KeyboardTeleop(Teleoperator):
                     arms = ["left", "right", "both"]
                     idx = arms.index(self.current_control_arm)
                     self.current_control_arm = arms[(idx + 1) % len(arms)]
+                # # 处理切换逻辑
+                # if cmd == "toggle_arm" and hasattr(self, "_robot"):
+                #     self._robot.switch_control_arm()
+                # elif cmd == "toggle_bimanual" and hasattr(self, "_robot"):
+                #     # 直接调用机器人的切换方法
+                #     self._robot.toggle_bimanual_mode()
                 elif cmd == "quit":
                     self._pressed_keys["quit"] = True
                 else:
@@ -117,6 +124,7 @@ class WalkerS2KeyboardTeleop(Teleoperator):
                 self._pressed_keys["quit"] = True
         except Exception:
             pass
+        
 
     def _on_release(self, key):
         try:
@@ -125,6 +133,8 @@ class WalkerS2KeyboardTeleop(Teleoperator):
                 # toggle_arm 是瞬时动作，没有持久状态，跳过
                 if cmd != "toggle_arm" and cmd in self._pressed_keys:
                     self._pressed_keys[cmd] = False
+                # if cmd in self._pressed_keys:
+                #     self._pressed_keys[cmd] = True
         except Exception:
             pass
 

@@ -1,20 +1,11 @@
 """
-teleop_and_record.py - lerobot v3 (0.5.x) 下的遥操作数据采集脚本
+teleop_and_record.py - lerobot v3 (0.5.1) 下的遥操作数据采集脚本
 
-运行方式:
-    PYTHONPATH=$PYTHONPATH:$(pwd)/src /isaac-sim/python.sh \
-        src/lerobot/scripts/teleop_and_record.py \
-        [--num_episodes 5] [--fps 30] [--task packing_box] \
-        [--repo_id sjj/test] [--save_path datasets/task4/v1] \
-        [--task_cfg src/lerobot/ecbg/config/task4.yaml]
-
-主要修复（相对于原 teleop_and_record.py）:
-  1. 修复键盘状态不同步问题: 通过 teleop.sync_to_robot(robot) 将 teleop 的
-     _pressed_keys 同步给 robot，原代码 robot._pressed_keys 始终为空 {}
-  2. 使用 argparse 支持命令行参数，不用每次改代码
-  3. 整合 warmup / episode_time_s / reset_time_s 等与旧版一致的参数
-  4. 正确处理 LeRobotDataset.create() 的 features 参数
-  5. 退出信号检测: 同时支持 teleop quit 键和 robot quit 键
+核心修复:
+  1. 将 dataset.consolidate() 替换为官方 0.5.1 标准的 dataset.finalize()，解决 Parquet 损坏问题。
+  2. 引入官方的 VideoEncodingManager 上下文管理器，确保视频帧与动作数据安全对齐并落盘。
+  3. 保留了终端实时打印 Action 和 Observation，便于检查数据。
+  4. 交互逻辑（回车开始，左键重录，右键保存，Q键退出）保持不变。
 """
 
 import argparse
@@ -24,24 +15,65 @@ from pathlib import Path
 
 import torch
 
+# 引入 pynput 用于全局按键和鼠标监听
+from pynput import keyboard, mouse
+
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.robots.walker_s2_sim.walkers2sim import WalkerS2sim
 from lerobot.robots.walker_s2_sim.walkers2simConfig import WalkerS2Config
 from lerobot.teleoperators.walker_s2_keyboard.teleop import WalkerS2KeyboardTeleop
 from lerobot.teleoperators.walker_s2_keyboard.teleop_config import WalkerS2KeyboardTeleopConfig
 
+# 核心修复：引入官方的视频编码管理器
+from lerobot.datasets.video_utils import VideoEncodingManager
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-# 修复 1: 强制关闭 PIL 等底层库的烦人调试日志
-# ==========================================
 logging.getLogger("PIL").setLevel(logging.WARNING)
 logging.getLogger("h5py").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+# ==========================================
+# 状态机：用于在后台线程和主线程间传递交互信号
+# ==========================================
+class UIState:
+    start_recording = False
+    end_episode_early = False
+    redo_episode = False
+    quit_program = False
+
+    @classmethod
+    def reset_episode_flags(cls):
+        cls.start_recording = False
+        cls.end_episode_early = False
+        cls.redo_episode = False
+
+ui_state = UIState()
+
+def on_key_press(key):
+    if key == keyboard.Key.enter:
+        ui_state.start_recording = True
+    elif hasattr(key, 'char') and key.char and key.char.lower() == 'q':
+        ui_state.quit_program = True
+
+    # 同步给 teleop 实例
+    if hasattr(main, 'teleop'):
+        main.teleop._on_press(key)
+
+def on_key_release(key):
+    if hasattr(main, 'teleop'):
+        main.teleop._on_release(key)
+
+def on_mouse_click(x, y, button, pressed):
+    if pressed:
+        if button == mouse.Button.left:
+            ui_state.redo_episode = True
+        elif button == mouse.Button.right:
+            ui_state.end_episode_early = True
 
 def parse_args():
     parser = argparse.ArgumentParser(description="WalkerS2 遥操作数据采集")
@@ -54,29 +86,31 @@ def parse_args():
         "--task_cfg",
         type=str,
         default="src/lerobot/ecbg/config/task4.yaml",
+        # default="Ubtech_sim/config/Packing_Box.yaml",
         help="Isaac Sim 场景配置 YAML 路径",
     )
     parser.add_argument("--headless", action="store_true", help="无头模式运行仿真")
-    parser.add_argument("--warmup_time_s", type=float, default=5.0, help="每个 episode 开始前等待时间(秒)")
     parser.add_argument("--episode_time_s", type=float, default=60.0, help="每个 episode 最长时间(秒)")
-    parser.add_argument("--reset_time_s", type=float, default=5.0, help="重置后等待时间(秒)")
     parser.add_argument("--resume", action="store_true", help="从已有数据集继续采集")
     return parser.parse_args()
 
-
-def wait_for_start_signal(teleop: WalkerS2KeyboardTeleop, robot: WalkerS2sim, wait_s: float):
-    """在 warmup 期间持续渲染仿真，等待操作者准备好。"""
-    logger.info(f"Warmup: 等待 {wait_s:.1f}s...")
-    deadline = time.perf_counter() + wait_s
-    while time.perf_counter() < deadline:
-        # 持续渲染，让操作者能看到场景，同步状态但不记录
+def wait_for_start_signal(teleop: WalkerS2KeyboardTeleop, robot: WalkerS2sim):
+    """等待操作者按下 Enter 键后才开始录制"""
+    logger.info("*" * 50)
+    logger.info("等待中: 请按下 [Enter] 键开始录制当前 Episode。")
+    logger.info("随时可按 [Q] 键退出整个程序。")
+    logger.info("*" * 50)
+    
+    UIState.reset_episode_flags()
+    
+    while not ui_state.start_recording and not ui_state.quit_program:
         teleop.sync_to_robot(robot)
         robot.step(render=True)
         time.sleep(0.01)
-    # 清空 quit 信号，防止 warmup 期间按键漏入录制
-    teleop._pressed_keys["quit"] = False
-    robot._pressed_keys = {}
 
+    if ui_state.quit_program:
+        return False
+    return True
 
 def record_episode(
     teleop: WalkerS2KeyboardTeleop,
@@ -85,56 +119,75 @@ def record_episode(
     task_description: str,
     fps: int,
     episode_time_s: float,
-) -> bool:
+) -> str:
     """
     录制一个 episode。
-
-    Returns:
-        True  - episode 正常录制完毕（时间到或手动结束）
-        False - 用户请求退出（quit 键）
+    Returns 状态字符串: "success", "redo", "quit"
     """
     dt = 1.0 / fps
     max_steps = int(episode_time_s * fps)
     step_count = 0
 
+    UIState.reset_episode_flags()
+
     logger.info(f"开始录制（最多 {max_steps} 步 / {episode_time_s:.0f}s）")
-    logger.info("按 q 结束当前 episode，再按 q 退出程序")
+    logger.info("操作提示: [鼠标右键]->保存并进入下一集 | [鼠标左键]->重新录制本集 | [Q]->退出程序")
 
     while step_count < max_steps:
         t_start = time.perf_counter()
 
-        # ===== 关键修复: 同步键盘状态到机器人 =====
-        # 原代码中 robot._pressed_keys 始终为 {}，导致机器人不响应键盘输入
-        # sync_to_robot() 会:
-        #   1. 复制 teleop._pressed_keys → robot._pressed_keys
-        #   2. 同步 current_control_arm 和 _speed_index
-        #   3. 调用 robot._enqueue_keyboard_snapshot() 入队信号
+        if ui_state.quit_program:
+            logger.info("检测到退出信号 [Q]，准备退出程序。")
+            return "quit"
+        if ui_state.redo_episode:
+            ui_state.redo_episode = False
+            logger.warning("检测到 [鼠标左键]，丢弃当前数据，重新录制本集！")
+            return "redo"
+        if ui_state.end_episode_early:
+            ui_state.end_episode_early = False
+            logger.info("检测到 [鼠标右键]，提前结束并保存当前 Episode。")
+            return "success"
+        if teleop._pressed_keys.get("quit", False):
+            return "quit"
+
         teleop.sync_to_robot(robot)
-        # ===========================================
-
-        # send_action(None) = 遥操作模式，从当前关节状态构造记录用 action
-        # 实际的 IK 控制由物理回调 _robot_control_callback 完成
+        
+        # 1. 获取 Action
         record_action = robot.send_action(None)
+        if isinstance(record_action, torch.Tensor):
+            record_action = record_action.to(torch.float32)
+        else:
+            record_action = torch.tensor(record_action, dtype=torch.float32)
 
-        # 推进物理仿真（触发 _robot_control_callback 执行 IK 和关节控制）
+        # 2. 仿真步进
         robot.step(render=True)
-
-        # 获取观测
+        
+        # 3. 获取 Observation
         obs = robot.get_observation()
+        # 【关键修复】：强制转换 obs 中的所有浮点数组
+        processed_obs = {}
+        for k, v in obs.items():
+            if isinstance(v, torch.Tensor):
+                processed_obs[k] = v.to(dtype=torch.float32)
+            else:
+                processed_obs[k] = torch.tensor(v, dtype=torch.float32)
+                
+        # 每秒打印 1 次，防止刷屏，便于比对数据
+        if step_count % fps == 0:
+            logger.info(f"--- 录制中 | 第 {step_count} 帧 ---")
+            action_list = [round(x, 3) for x in record_action.tolist()]
+            logger.info(f"Action (20维): {action_list}")
+            
+            if "observation.state" in obs:
+                obs_list = [round(x, 3) for x in obs["observation.state"].tolist()]
+                logger.info(f"observation State (20维): {obs_list}")
 
-        # 存入数据集
         frame_data = {
             "action": record_action,
             "task": task_description,
             **obs,
         }
         dataset.add_frame(frame_data)
-
-        # 检查退出信号（teleop 或 robot 的 quit 键）
-        if teleop._pressed_keys.get("quit", False) or robot._pressed_keys.get("quit", False):
-            logger.info("检测到 quit 信号，结束当前 episode")
-            teleop._pressed_keys["quit"] = False
-            return False
 
         # 维持目标帧率
         elapsed = time.perf_counter() - t_start
@@ -143,49 +196,42 @@ def record_episode(
 
         step_count += 1
 
-    return True
-
+    logger.info("时间到，当前 Episode 录制完成。")
+    return "success"
 
 def main():
     args = parse_args()
 
-    # ---- 初始化机器人 ----
-    robot_cfg = WalkerS2Config(
-        task_cfg_path=args.task_cfg,
-        headless=args.headless,
-    )
+    robot_cfg = WalkerS2Config(task_cfg_path=args.task_cfg, headless=args.headless)
     robot = WalkerS2sim(robot_cfg)
+    teleop_cfg = WalkerS2KeyboardTeleopConfig(speed_levels=[0.015, 0.035, 0.05], default_speed_index=1)
+    main.teleop = WalkerS2KeyboardTeleop(teleop_cfg)
 
-    # ---- 初始化遥操作器 ----
-    teleop_cfg = WalkerS2KeyboardTeleopConfig(
-        speed_levels=[0.015, 0.035, 0.05],
-        default_speed_index=1,
-    )
-    teleop = WalkerS2KeyboardTeleop(teleop_cfg)
+    # 启动监听器
+    k_listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
+    m_listener = mouse.Listener(on_click=on_mouse_click)
+    k_listener.start()
+    m_listener.start()
+
+    dataset = None 
 
     try:
         logger.info("正在连接机器人...")
         robot.connect()
         logger.info("正在连接键盘遥操作器...")
-        teleop.connect()
+        main.teleop.connect()
 
-        # ---- 构建 dataset features ----
-        # observation_features: observation.state + observation.images.* + observation.environment_state
-        # action_features:      action (20维)
         dataset_features = {}
         dataset_features.update(robot.observation_features)
-        dataset_features.update(robot.action_features)  # 使用机器人的 action_features 而非 teleop 的
+        dataset_features.update(robot.action_features)
 
-        # ---- 创建数据集 ----
         save_path = Path(args.save_path)
         if args.resume and save_path.exists():
-            logger.info(f"继续已有数据集: {save_path}")
-            dataset = LeRobotDataset(
-                repo_id=args.repo_id,
-                root=save_path,
-            )
+            dataset = LeRobotDataset(repo_id=args.repo_id, root=save_path)
+            # 兼容恢复录制时的图片写入器
+            if hasattr(robot, "cameras") and len(robot.cameras) > 0:
+                dataset.start_image_writer(num_processes=0, num_threads=4 * len(robot.cameras))
         else:
-            logger.info(f"创建新数据集: {save_path}")
             dataset = LeRobotDataset.create(
                 repo_id=args.repo_id,
                 root=save_path,
@@ -193,62 +239,71 @@ def main():
                 robot_type="walker_s2_sim",
                 features=dataset_features,
                 use_videos=True,
+                image_writer_processes=0,
+                image_writer_threads=4 * len(robot.cameras),
             )
 
-        logger.info(f"数据集特征: {list(dataset_features.keys())}")
         logger.info(f"开始采集 {args.num_episodes} 个 episodes，保存路径: {save_path}")
 
         episode_idx = 0
-        while episode_idx < args.num_episodes:
-            logger.info(f"\n========== Episode {episode_idx + 1}/{args.num_episodes} ==========")
+        
+        # 核心修复：使用 VideoEncodingManager 包装循环，安全处理视频帧缓冲
+        with VideoEncodingManager(dataset):
+            while episode_idx < args.num_episodes:
+                logger.info(f"\n========== Episode {episode_idx + 1}/{args.num_episodes} ==========")
 
-            # Warmup: 等待操作者准备
-            if args.warmup_time_s > 0:
-                wait_for_start_signal(teleop, robot, args.warmup_time_s)
+                if not wait_for_start_signal(main.teleop, robot):
+                    break 
 
-            # 录制 episode
-            should_continue = record_episode(
-                teleop=teleop,
-                robot=robot,
-                dataset=dataset,
-                task_description=args.task,
-                fps=args.fps,
-                episode_time_s=args.episode_time_s,
-            )
+                status = record_episode(
+                    teleop=main.teleop,
+                    robot=robot,
+                    dataset=dataset,
+                    task_description=args.task,
+                    fps=args.fps,
+                    episode_time_s=args.episode_time_s,
+                )
 
-            # 保存 episode
-            dataset.save_episode()
-            episode_idx += 1
-            logger.info(f"Episode {episode_idx} 已保存 (共 {len(dataset)} 帧)")
-
-            if not should_continue:
-                logger.info("收到退出信号，停止采集")
-                break
-
-            # Reset: 重置场景，等待稳定
-            if episode_idx < args.num_episodes:
-                logger.info("重置场景...")
-                robot.reset()
-                if args.reset_time_s > 0:
-                    logger.info(f"等待 {args.reset_time_s:.1f}s 后开始下一 episode...")
-                    time.sleep(args.reset_time_s)
+                if status == "quit":
+                    break
+                elif status == "redo":
+                    dataset.clear_episode_buffer()
+                    logger.info("正在重置场景以备重新采集...")
+                    robot.reset()
+                    continue 
+                elif status == "success":
+                    dataset.save_episode()
+                    episode_idx += 1
+                    logger.info(f"Episode {episode_idx} 已成功保存到缓冲区 (累计 {len(dataset)} 帧)")
+                    
+                    if episode_idx < args.num_episodes:
+                        logger.info("正在重置场景，准备下一集...")
+                        robot.reset()
 
     except KeyboardInterrupt:
         logger.info("收到 Ctrl+C，正在退出...")
     except Exception as e:
         logger.error(f"发生错误: {e}", exc_info=True)
     finally:
-        logger.info("正在关闭系统...")
+        logger.info("正在关闭系统并保存数据...")
+        k_listener.stop()
+        m_listener.stop()
+        
+        # 核心修复：使用 dataset.finalize() 写出 Parquet 的 metadata
+        if dataset is not None:
+            logger.info("正在执行 dataset.finalize() 闭合 Parquet 文件并写入元数据...")
+            try:
+                dataset.finalize()
+                logger.info("数据集元数据合并完成！Parquet 文件安全！")
+            except Exception as e:
+                logger.error(f"关闭数据集时出错: {e}")
+
         try:
-            teleop.disconnect()
-        except Exception:
-            pass
-        try:
+            main.teleop.disconnect()
             robot.disconnect()
         except Exception:
             pass
-        logger.info(f"数据采集完成！数据集位置: {args.save_path}")
-
+        logger.info(f"数据采集结束！数据集最终位置: {args.save_path}")
 
 if __name__ == "__main__":
     main()
