@@ -1,0 +1,71 @@
+      
+# root_path: "../../assets/resources/"
+root_path: "/workspace/lerobot_0.5.1/assets/resources/"
+
+scene_usd: 'Collected_Task4/SubUSDs/2_small_warehouse2.usd'
+
+timelimit: 100
+
+task_number: 2
+
+part:
+  part_a_usd: "Collected_Part_B_ori_color/Part_B.usd"
+  part_b_usd: "Collected_Task2_Part_A/Task2_Part_A.usd"
+  num_parts: 5
+  part_distance: 0.4
+
+plane:
+  plane_position: 
+  # - [0.68616, 0.26859, 1.25]
+  - [0.1004867504168937, 0.26859, 1.25]
+  plane_scale: 
+  - [0.1, 0.05, 0.1] 
+
+ConveyorBelt:
+  ConveyorBelt_usd: 'Collected_ConveyorBelt_New/Collected_ConveyorBelt/ConveyorBelt.usd'
+  ConveyorBelt_position: 
+  - [-0.13357845206723284, 0.26859, 0.0]
+  ConveyorBelt_scale: 
+  - [1.0, 1.0, 1.0]
+
+table:
+  table_usd: 'Collected_table_v2/table_v2.usd'
+  table_position: 
+  - [0.75, -0.05, 0.432]
+  table_scale: 
+  - [1.0, 1.0, 0.97167]
+
+box:
+  box_usd: 'Box/box_60_40_23_cut_0.usd'
+  box_position: 
+  - [0.48616, -0.062, 0.92]
+  - [0.88616, -0.062, 0.92]
+  box_scale: 
+  - [0.38, 0.75, 0.36]
+  - [0.38, 0.75, 0.36]
+  box_rotation:
+  - [1, 0, 0, 0]
+  - [1, 0, 0, 0]
+  lock_boxes: true   # 禁止物理引擎移动箱子，保持固定位置
+
+robot:
+  robot_usd: 'Collected_s2_v1_ecbg/s2_v1.usd' 
+  robot_position: [0.7, -0.35, 0.9]
+  robot_rotation: [0, 0, 90]
+
+grasp:
+  use_scatter_area: true
+  target_index: 0
+  lift_height: 0.17
+  settle_time: 2.0
+  approach_time: 3.0
+  reach_time: 2.0
+  hold_time: 1.0
+  lift_time: 2.0
+  tcp_offset: [0.0, 0.0, 0.0]   # sixforce_link 局部坐标系下 TCP 的偏移 (m)
+  ik_rot_weight: 0.1
+  # 传动带中轴线起始端附近 (ConveyorBelt 中心 x=0.686, y=0.269)
+  # 物体应在带面入口端生成，算符及坐标根据具体 USD 模型调整
+  scatter_area:
+    center: [0.12, 0.26859, 1.2]   # 带面入口中心，高度参考 plane_position
+    size:   [0.06, 0.04]               # 第一船 x方向, 第二船 y方向 (m)，紧贴带宽

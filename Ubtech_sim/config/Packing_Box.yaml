@@ -1,0 +1,47 @@
+# root_path: "../../assets/resources/"
+root_path: "/workspace/lerobot_0.5.1/assets/resources/"
+
+scene_usd: 'Collected_Task4/SubUSDs/2_small_warehouse2.usd'
+
+timelimit: 100
+
+task_number: 4
+
+table:
+  table_usd: 'Collected_table_v2/table_v2.usd'
+  table_position: 
+  - [0.846, 0.3, 0.5]
+  table_scale: 
+  - [1.9927, 1.8738, 1.1109]
+
+box:
+  box_usd: 'Collected_foam/Box_with_foam.usd'
+  box_position: 
+  - [0.855, 0.3, 1.13]
+  box_scale: 
+  - [1, 1, 1]
+  # lock_boxes: true   # 禁止物理引擎移动箱子，保持固定位置
+
+foam:
+  foam_usd: 'Collected_foam/foam.usd' 
+  foam_position: [0.85631, 0.18478, 1.0403]
+  foam_scale: [0.5, 0.5, 0.5]
+
+robot:
+  robot_usd: 'Collected_s2_v1_ecbg/s2_v1.usd' 
+  robot_position: [0.847, -0.25, 0.9] 
+  robot_rotation: [0, 0, 90]
+
+grasp:
+  target_index: 0
+  lift_height: 0.17
+  settle_time: 2.0
+  approach_time: 3.0
+  reach_time: 2.0
+  hold_time: 1.0
+  lift_time: 2.0
+  tcp_offset: [0.0, 0.0, 0.22]   # sixforce_link 局部坐标系下 TCP 的偏移 (m)
+  ik_rot_weight: 0.1
+  
+save_poses_to_csv: False
+poses_csv_path: 'target_object_poses.csv'
