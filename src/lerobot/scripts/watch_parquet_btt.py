@@ -78,7 +78,7 @@ import os
 
 # ================= 配置区域 =================
 # 1. 指定你的 parquet 文件路径 (注意：这里写的是 Docker 内部的真实路径)
-PARQUET_FILE_PATH = '/data/btt/ybx_expri/lerobot_0.5.1/datasets/task4/v5/data/chunk-000/file-000.parquet'
+PARQUET_FILE_PATH = '/data/btt/ybx_expri/lerobot_0.5.1/datasets/task3/v3/data/chunk-000/file-000.parquet'
 
 # 2. 指定输出路径 (保存在 /workspace 根目录下，方便你在宿主机直接查看)
 EXCEL_OUTPUT_PATH = '/data/btt/ybx_expri/lerobot_0.5.1/src/lerobot/scripts/episode_000000_full_data.xlsx'

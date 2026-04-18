@@ -5,7 +5,7 @@ teleop_and_record.py - lerobot v3 (0.5.1) 下的遥操作数据采集脚本
   1. 将 dataset.consolidate() 替换为官方 0.5.1 标准的 dataset.finalize()，解决 Parquet 损坏问题。
   2. 引入官方的 VideoEncodingManager 上下文管理器，确保视频帧与动作数据安全对齐并落盘。
   3. 保留了终端实时打印 Action 和 Observation，便于检查数据。
-  4. 交互逻辑：回车开始，[方向键左]重录，[方向键右]提前保存，[Q]退出。
+  4. 交互逻辑（回车开始，左键重录，右键保存，Q键退出）保持不变。
 """
 
 import argparse
@@ -15,8 +15,8 @@ from pathlib import Path
 
 import torch
 
-# 仅引入 keyboard 用于全局按键监听，彻底移除 mouse 避免误触
-from pynput import keyboard
+# 引入 pynput 用于全局按键和鼠标监听
+from pynput import keyboard, mouse
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.robots.walker_s2_sim.walkers2sim import WalkerS2sim
@@ -24,6 +24,7 @@ from lerobot.robots.walker_s2_sim.walkers2simConfig import WalkerS2Config
 from lerobot.teleoperators.walker_s2_keyboard.teleop import WalkerS2KeyboardTeleop
 from lerobot.teleoperators.walker_s2_keyboard.teleop_config import WalkerS2KeyboardTeleopConfig
 
+# 核心修复：引入官方的视频编码管理器
 from lerobot.datasets.video_utils import VideoEncodingManager
 
 logging.basicConfig(
@@ -54,23 +55,25 @@ class UIState:
 ui_state = UIState()
 
 def on_key_press(key):
-    # 处理流程控制快捷键
     if key == keyboard.Key.enter:
         ui_state.start_recording = True
-    elif key == keyboard.Key.left:
-        ui_state.redo_episode = True
-    elif key == keyboard.Key.right:
-        ui_state.end_episode_early = True
     elif hasattr(key, 'char') and key.char and key.char.lower() == 'q':
         ui_state.quit_program = True
 
-    # 同步给 teleop 实例处理遥操作控制（如 1/3/4/6 或 k/l）
+    # 同步给 teleop 实例
     if hasattr(main, 'teleop'):
         main.teleop._on_press(key)
 
 def on_key_release(key):
     if hasattr(main, 'teleop'):
         main.teleop._on_release(key)
+
+def on_mouse_click(x, y, button, pressed):
+    if pressed:
+        if button == mouse.Button.left:
+            ui_state.redo_episode = True
+        elif button == mouse.Button.right:
+            ui_state.end_episode_early = True
 
 def parse_args():
     parser = argparse.ArgumentParser(description="WalkerS2 遥操作数据采集")
@@ -83,6 +86,7 @@ def parse_args():
         "--task_cfg",
         type=str,
         default="src/lerobot/ecbg/config/task4.yaml",
+        # default="Ubtech_sim/config/Packing_Box.yaml",
         help="Isaac Sim 场景配置 YAML 路径",
     )
     parser.add_argument("--headless", action="store_true", help="无头模式运行仿真")
@@ -127,8 +131,7 @@ def record_episode(
     UIState.reset_episode_flags()
 
     logger.info(f"开始录制（最多 {max_steps} 步 / {episode_time_s:.0f}s）")
-    # 更新了终端打印的操作提示
-    logger.info("操作提示: [方向键右 ->]->保存并进入下一集 | [方向键左 <-]->重新录制本集 | [Q]->退出程序")
+    logger.info("操作提示: [鼠标右键]->保存并进入下一集 | [鼠标左键]->重新录制本集 | [Q]->退出程序")
 
     while step_count < max_steps:
         t_start = time.perf_counter()
@@ -138,11 +141,11 @@ def record_episode(
             return "quit"
         if ui_state.redo_episode:
             ui_state.redo_episode = False
-            logger.warning("检测到 [方向键左 <-]，丢弃当前数据，重新录制本集！")
+            logger.warning("检测到 [鼠标左键]，丢弃当前数据，重新录制本集！")
             return "redo"
         if ui_state.end_episode_early:
             ui_state.end_episode_early = False
-            logger.info("检测到 [方向键右 ->]，提前结束并保存当前 Episode。")
+            logger.info("检测到 [鼠标右键]，提前结束并保存当前 Episode。")
             return "success"
         if teleop._pressed_keys.get("quit", False):
             return "quit"
@@ -204,9 +207,11 @@ def main():
     teleop_cfg = WalkerS2KeyboardTeleopConfig(speed_levels=[0.015, 0.035, 0.05], default_speed_index=1)
     main.teleop = WalkerS2KeyboardTeleop(teleop_cfg)
 
-    # 启动键盘监听器，去掉了鼠标监听器
+    # 启动监听器
     k_listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
+    m_listener = mouse.Listener(on_click=on_mouse_click)
     k_listener.start()
+    m_listener.start()
 
     dataset = None 
 
@@ -242,6 +247,7 @@ def main():
 
         episode_idx = 0
         
+        # 核心修复：使用 VideoEncodingManager 包装循环，安全处理视频帧缓冲
         with VideoEncodingManager(dataset):
             while episode_idx < args.num_episodes:
                 logger.info(f"\n========== Episode {episode_idx + 1}/{args.num_episodes} ==========")
@@ -281,7 +287,9 @@ def main():
     finally:
         logger.info("正在关闭系统并保存数据...")
         k_listener.stop()
+        m_listener.stop()
         
+        # 核心修复：使用 dataset.finalize() 写出 Parquet 的 metadata
         if dataset is not None:
             logger.info("正在执行 dataset.finalize() 闭合 Parquet 文件并写入元数据...")
             try:
