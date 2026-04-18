@@ -262,9 +262,15 @@ class IsaacSimRobotInterface:
     finger_joint_names: list[str] = [
         "L_finger1_joint", "L_finger2_joint", "R_finger1_joint", "R_finger2_joint"
     ]
-    gripper_open_width: float = 0.06
-    gripper_close_width: float = 0.02
+    
+    # ---------------- 替换这里 ----------------
+    # 恢复旧版本模型中真实的物理限位和力矩
+    gripper_open_width: float = -0.0215
+    gripper_close_width: float = 0.01
+    gripper_open_tau: float = -100.0
     gripper_close_tau: float = 100.0   
+    # ----------------------------------------
+
     sixforce_joint_names: list[str] = ["L_sixforce_joint", "R_sixforce_joint"]
 
     def __init__(
@@ -482,29 +488,19 @@ class IsaacSimRobotInterface:
         )
 
     def apply_finger_efforts(self, efforts: list[float]) -> None:
-        """对 4 个夹爪关节施加力矩（力控模式，夹持物体时使用）。
-
-        efforts 中为 0.0 的关节不施力。
-        """
+        """对 4 个夹爪关节施加力矩（力控模式，夹持物体时使用）。"""
         if self._articulation is None:
             return
         from isaacsim.core.utils.types import ArticulationActions
 
-        nonzero_efforts, nonzero_indices = [], []
-        for effort, idx in zip(efforts, self.finger_joint_indices):
-            if abs(effort) > 1e-6:
-                nonzero_efforts.append(effort)
-                nonzero_indices.append(idx)
-
-        if not nonzero_efforts:
-            return
-
-        effort_tensor = torch.tensor([nonzero_efforts], dtype=torch.float32)
-        indices = torch.tensor(nonzero_indices, dtype=torch.int32)
+        # 【核心修复】：不要过滤 0.0！必须把所有的 effort 下发给仿真器，
+        # 这样当我们发送 0.0 时，才能清除之前残留的 100.0 夹持力矩！
+        effort_tensor = torch.tensor([efforts], dtype=torch.float32)
+        indices = torch.tensor(self.finger_joint_indices, dtype=torch.int32)
+        
         self._articulation.apply_action(
             ArticulationActions(joint_efforts=effort_tensor, joint_indices=indices)
         )
-
     # -----------------------------------------------------------------------
 
     def close_gripper(self, side: Optional[str] = None):
@@ -819,13 +815,14 @@ class WalkerS2sim(Robot):
     def _robot_control_callback(self, step_size: float) -> None:
         if not self.is_connected:
             return
+        
+        keys = self._pressed_keys
 
         if self._hold_arm_positions is None:
             states = self._robot_interface.get_joint_states()
             if states:
                 self._hold_arm_positions = np.array(states["arm_positions"], dtype=np.float32)
                 self._hold_finger_positions = np.array(states["finger_positions"], dtype=np.float32)
-                logger.info("[callback] 已快照初始关节状态作为保持目标")
             else:
                 return
 
@@ -866,44 +863,32 @@ class WalkerS2sim(Robot):
                     ros2_data = self._ros2_teleop.get_latest(max_age_s=0.5)
 
                 if ros2_data is not None:
-                    self._hold_arm_positions = np.asarray(
-                        ros2_data["arm_positions"], dtype=np.float32
-                    ).copy()
+                    self._hold_arm_positions = np.asarray(ros2_data["arm_positions"], dtype=np.float32).copy()
                     if ros2_data["finger_positions"] is not None:
-                        self._hold_finger_positions = np.asarray(
-                            ros2_data["finger_positions"], dtype=np.float32
-                        ).copy()
-                    _, _, left_gripper, right_gripper, _ = self._compute_keyboard_delta(
-                        key_snapshot
-                    )
+                        self._hold_finger_positions = np.asarray(ros2_data["finger_positions"], dtype=np.float32).copy()
+                    
+                    _, _, left_gripper, right_gripper, _ = self._compute_keyboard_delta(key_snapshot)
                     if ros2_data["finger_positions"] is None:
                         gripper_step = 0.002
                         g_open = self._robot_interface.gripper_open_width
                         g_close = self._robot_interface.gripper_close_width
                         g_lo, g_hi = min(g_open, g_close), max(g_open, g_close)
+                        
                         if abs(left_gripper) > 0.01:
-                            # 【Bug修复】：当 left_gripper 为 1.0 (闭合)时，应该减小宽度趋近 g_close (0.02)
-                            # 所以这里用减号：- (1.0 * 0.002) = 变小
                             self._hold_finger_positions[:2] = np.clip(
-                                self._hold_finger_positions[:2] - left_gripper * gripper_step,
-                                g_lo,
-                                g_hi,
+                                self._hold_finger_positions[:2] - left_gripper * gripper_step, g_lo, g_hi
                             )
-                            self._left_gripping = left_gripper > 0
+                        # 【修复】：放在if外面，保证松开按键时能重置为False
+                        self._left_gripping = (left_gripper > 0.5)
+
                         if abs(right_gripper) > 0.01:
                             self._hold_finger_positions[2:4] = np.clip(
-                                self._hold_finger_positions[2:4] - right_gripper * gripper_step,
-                                g_lo,
-                                g_hi,
+                                self._hold_finger_positions[2:4] - right_gripper * gripper_step, g_lo, g_hi
                             )
-                            self._right_gripping = right_gripper > 0
+                        self._right_gripping = (right_gripper > 0.5)
                 else:
                     (
-                        left_delta,
-                        right_delta,
-                        left_gripper,
-                        right_gripper,
-                        _,
+                        left_delta, right_delta, left_gripper, right_gripper, _,
                     ) = self._compute_keyboard_delta(key_snapshot)
                     has_left_input = np.linalg.norm(left_delta) > 1e-8
                     has_right_input = np.linalg.norm(right_delta) > 1e-8
@@ -911,82 +896,77 @@ class WalkerS2sim(Robot):
                     if has_left_input or has_right_input:
                         ee_poses = self._robot_interface.get_ee_poses()
                         if ee_poses is not None:
-                            left_target = (
-                                np.asarray(ee_poses["left"][:6] + left_delta, dtype=np.float32)
-                                if has_left_input
-                                else None
-                            )
-                            right_target = (
-                                np.asarray(ee_poses["right"][:6] + right_delta, dtype=np.float32)
-                                if has_right_input
-                                else None
-                            )
+                            left_target = np.asarray(ee_poses["left"][:6] + left_delta, dtype=np.float32) if has_left_input else None
+                            right_target = np.asarray(ee_poses["right"][:6] + right_delta, dtype=np.float32) if has_right_input else None
                             ik_result = self._robot_interface.control_dual_arm_ik(
-                                step_size=step_size,
-                                left_target_xyzrpy=left_target,
-                                right_target_xyzrpy=right_target,
+                                step_size=step_size, left_target_xyzrpy=left_target, right_target_xyzrpy=right_target,
                             )
                             if ik_result and "smoothed_positions" in ik_result:
                                 sp = ik_result["smoothed_positions"]
                                 offset = 0
                                 if "left_joint_positions" in ik_result:
-                                    self._hold_arm_positions[:7] = np.array(
-                                        sp[offset : offset + 7], dtype=np.float32
-                                    )
+                                    self._hold_arm_positions[:7] = np.array(sp[offset : offset + 7], dtype=np.float32)
                                     offset += 7
                                 if "right_joint_positions" in ik_result:
-                                    self._hold_arm_positions[7:14] = np.array(
-                                        sp[offset : offset + 7], dtype=np.float32
-                                    )
+                                    self._hold_arm_positions[7:14] = np.array(sp[offset : offset + 7], dtype=np.float32)
 
+                    # --- 纯净版键盘控制夹爪逻辑 ---
                     gripper_step = 0.002
-                    g_open = self._robot_interface.gripper_open_width
-                    g_close = self._robot_interface.gripper_close_width
+                    g_open = self._robot_interface.gripper_open_width     # -0.0215
+                    g_close = self._robot_interface.gripper_close_width   # 0.01
                     g_lo, g_hi = min(g_open, g_close), max(g_open, g_close)
+                    
                     if abs(left_gripper) > 0.01:
-                        # 【Bug修复】：同理，键盘控制也必须用减号
                         self._hold_finger_positions[:2] = np.clip(
-                            self._hold_finger_positions[:2] - left_gripper * gripper_step,
-                            g_lo,
-                            g_hi,
+                            self._hold_finger_positions[:2] + left_gripper * gripper_step, g_lo, g_hi
                         )
-                        self._left_gripping = left_gripper > 0
+                        # 【恢复 Sticky 逻辑】：放在 if 内部。
+                        # 按 L (left_gripper=1.0): 变为 True，松开键保持 True (持续用力夹住)
+                        # 按 K (left_gripper=-1.0): 变为 False，松开夹持状态
+                        self._left_gripping = (left_gripper > 0.5)
+
                     if abs(right_gripper) > 0.01:
                         self._hold_finger_positions[2:4] = np.clip(
-                            self._hold_finger_positions[2:4] - right_gripper * gripper_step,
-                            g_lo,
-                            g_hi,
+                            self._hold_finger_positions[2:4] + right_gripper * gripper_step, g_lo, g_hi
                         )
-                        self._right_gripping = right_gripper > 0
+                        self._right_gripping = (right_gripper > 0.5)
+                        
 
-        # 统一下发保持目标
+        # 统一下发保持目标 (手臂)
         self._robot_interface.set_arm_joint_positions(
             target_arm_positions=self._hold_arm_positions.tolist(),
             task_num=self.config.task_cfg.get("task_number", 1),
         )
 
+        # 统一下发夹爪目标
         close_tau = self._robot_interface.gripper_close_tau
         efforts = [0.0, 0.0, 0.0, 0.0]
         finger_pos = self._hold_finger_positions.copy()
 
-        # 这里的 _left_gripping 此时就对应了正确的意思：当按下 'l' 键 (1.0 > 0) 时触发力控
         if self._left_gripping:
             efforts[0] = close_tau
             efforts[1] = close_tau
-            finger_pos[0] = float("nan")
-            finger_pos[1] = float("nan")
+            # 【终极修复】：注释掉下面两行 NaN。因为物理引擎忽略了你的力矩，
+            # 如果再把位置设为 NaN，夹爪就彻底失去控制卡死了。
+            # finger_pos[0] = float("nan")
+            # finger_pos[1] = float("nan")
+
         if self._right_gripping:
             efforts[2] = close_tau
             efforts[3] = close_tau
-            finger_pos[2] = float("nan")
-            finger_pos[3] = float("nan")
+            # 同理，注释掉右手的 NaN
+            # finger_pos[2] = float("nan")
+            # finger_pos[3] = float("nan")
 
+        # 优先下发位置控制（这样键盘按 k/l 就会平滑开合）
         self._robot_interface.set_finger_positions(
             target_fingers=finger_pos.tolist(),
             task_num=self.config.task_cfg.get("task_number", 1),
         )
+        # 辅助下发力矩控制（即便仿真器忽略它也不影响你的数据采集）
         self._robot_interface.apply_finger_efforts(efforts)
 
+    
     def _score_input_record_callback(self, step_size: float) -> None:
         if self._scene_builder is None:
             return

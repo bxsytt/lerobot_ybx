@@ -140,15 +140,22 @@ class WalkerS2KeyboardTeleop(Teleoperator):
 
     def get_action(self) -> torch.Tensor:
         """
-        返回 20 维零向量作为占位符。
-
-        注意: 在本架构中，实际的关节目标由机器人类的物理回调（_robot_control_callback）
-        通过 IK 求解得出。teleop_and_record.py 使用 robot.send_action(None) 获取记录用 action，
-        而不直接使用此方法的返回值控制机器人。
+        在新框架下，返回 20 维 Action。
         """
-        # Bug修复: 原来返回 torch.zeros(14)，与 action_features 的 shape (20,) 不一致，改为 20
-        return torch.zeros(20, dtype=torch.float32)
-
+        # 如果是录制模式，我们希望返回的是包含 IK 结果和夹爪位置的完整向量
+        # 此时 teleop_and_record.py 会调用 robot.send_action(None)
+        # 我们在这里返回一个占位符，但要确保维度是 20
+        action = torch.zeros(20, dtype=torch.float32)
+        
+        # 记录当前的开关指令（用于有些框架可能需要的 delta 控制）
+        if self._pressed_keys.get("gripper_open"):
+            action[-2:] = -1.0 
+        elif self._pressed_keys.get("gripper_close"):
+            action[-2:] = 1.0
+            
+        return action
+    
+    
     def sync_to_robot(self, robot) -> None:
         """
         将键盘状态同步到机器人实例。
